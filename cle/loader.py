@@ -124,8 +124,7 @@ class Loader:
         if arch is not None:
             self._main_opts.update({'arch': arch})
         self.preload_libs = []
-        self.initial_load_objects = self._internal_load(main_binary, *preload_libs, preloading=True)
-        self.initial_load_objects.extend(self._internal_load(*force_load_libs))
+        self.initial_load_objects = self._internal_load(main_binary, *preload_libs, *force_load_libs, preloading=(main_binary, *preload_libs))
 
         # cache
         self._last_object = None
@@ -227,10 +226,8 @@ class Loader:
         if self._tls_object is None:
             if isinstance(self.main_object, MetaELF):
                 self._tls_object = ELFTLSObject(self)
-                self._map_object(self._tls_object)
             elif isinstance(self.main_object, PE):
                 self._tls_object = PETLSObject(self)
-                self._map_object(self._tls_object)
         return self._tls_object
 
     @property
@@ -620,7 +617,7 @@ class Loader:
         """
         return 'ld.so' in name or 'ld64.so' in name or 'ld-linux' in name
 
-    def _internal_load(self, *args, preloading=False):
+    def _internal_load(self, *args, preloading=()):
         """
         Pass this any number of files or libraries to load. If it can't load any of them for any reason, it will
         except out. Note that the sematics of ``auto_load_libs`` and ``except_missing_libs`` apply at all times.
@@ -628,18 +625,17 @@ class Loader:
         It will return a list of all the objects successfully loaded, which may be smaller than the list you provided
         if any of them were previously loaded.
 
-        The ``main_binary`` has to come first, followed by any ``preload_libs`` to ensure symbols are resolved to
-        preloaded libraries ahead of any others. Without ``preloading=True``, then all the libraries will be treated
-        like ``force_load_libs`` (i.e., not resolving symbols to them).
-
-        :param preloading: If True, loaded objects are appended to ``self.preload_libs`` (i.e., force_load_libs are
-                           not treated like preload_libs)
+        The ``main_binary`` has to come first, followed by any additional libraries to load this round. To create the
+        effect of "preloading", i.e. ensuring symbols are resolved to preloaded libraries ahead of any others, pass
+        ``preloading`` as a list of identifiers which should be considered preloaded. Note that the identifiers will
+        be compared using object identity.
         """
         objects = []
         dependencies = []
         cached_failures = set() # this assumes that the load path is global and immutable by the time we enter this func
 
         for main_spec in args:
+            is_preloading = any(spec is main_spec for spec in preloading)
             if self.find_object(main_spec, extra_objects=objects) is not None:
                 l.info("Skipping load request %s - already loaded", main_spec)
                 continue
@@ -650,8 +646,8 @@ class Loader:
             if self.main_object is None:
                 self.main_object = main_obj
                 self.memory = Clemory(self.main_object.arch, root=True)
-            elif preloading:
-                    self.preload_libs.append(main_obj)
+            elif is_preloading:
+                self.preload_libs.append(main_obj)
 
         while self._auto_load_libs and dependencies:
             dep_spec = dependencies.pop(0)
@@ -687,6 +683,10 @@ class Loader:
             for obj in objects:
                 self._relocate_object(obj)
 
+        if self._tls_object:
+            self._tls_object.finalize_layout()
+            if not self._tls_object._is_mapped:
+                self._map_object(self._tls_object)
         for obj in objects:
             if isinstance(obj, (MetaELF, PE)) and obj.tls_used:
                 self.tls_object.map_object(obj)
